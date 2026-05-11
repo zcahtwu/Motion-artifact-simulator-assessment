@@ -1,0 +1,59 @@
+    def _rotate_coordinates_1D_motion(self, euler_motion_params, image_shape, kspace_order, Apply_inv_affine=True):
+        # Apply_inv_affinne is True for the nufft_type1 and false
+        # for the nuft2 we also add a 1 voxel translation to euler_motion_params todo check with different resolution
+        euler_motion_params_local = euler_motion_params.copy()
+        if Apply_inv_affine is False: #case for nufft_type2 add a one voxel shift
+            # one voxel shift if odd ! todo resolution ?
+            off_center = np.array([(x / 2 - x // 2) * 2 for x in image_shape])
+            euler_motion_params_local[:3, :] = euler_motion_params_local[:3, :] - \
+                                         np.repeat(np.expand_dims(off_center, 1), euler_motion_params_local.shape[1], axis=1)
+
+        lin_spaces = [np.linspace(-0.5, 0.5-1/x, x)*2*math.pi for x in image_shape]  # todo it suposes 1 vox = 1mm
+        meshgrids = np.meshgrid(lin_spaces[0], lin_spaces[1], lin_spaces[2], indexing='ij')
+        #remove 1/x to avoid small scaling
+        
+
+        #! Here below is the code updated for case of non isotropic voxels
+        lin_space_kx = np.linspace(self.kx_min, self.kx_max, self.matrix_size[0])
+        lin_space_ky = np.linspace(self.ky_min, self.ky_max, self.matrix_size[1])
+        lin_space_kz = np.linspace(self.kz_min, self.kz_max, self.matrix_size[2])
+        meshgrids = np.meshgrid(lin_space_kx, lin_space_ky, lin_space_kz, indexing='ij')
+
+        # pour une affine on ajoute de 1, dans les coordone du point, mais pour le augmented kspace
+        # on ajoute la phase initial, donc 0 ici
+        meshgrids.append(np.zeros(image_shape))
+
+        grid_out = np.array([mg for mg in meshgrids])
+        dim_order = np.hstack([np.array(0), np.array(kspace_order)+1]) #first dim is 4 (homogeneous coordinates)
+        grid_out = grid_out.transpose(dim_order) #so that wanted phase dim is at the end
+
+        if euler_motion_params_local.shape[1] != grid_out.shape[3]:
+            raise('dimenssion issue euler_motion_params and phase dim')
+        #applied motion at each phase step (on the kspace grid plan)
+
+        for nnp in range(euler_motion_params_local.shape[1]):
+            aff = get_matrix_from_euler_and_trans(euler_motion_params_local[:,nnp])
+            if Apply_inv_affine:
+                aff = np.linalg.inv(aff)
+            # #! apply the adjustment to the affine matrix
+            # aff = inv_temp_matrix @ aff @ temp_matrix
+
+            grid_plane = grid_out[:, :, :, nnp]
+            shape_mem = grid_plane.shape
+            #! Here the affine is transposed so the rotation is reversed again
+            grid_plane_moved = np.matmul(aff.T, grid_plane.reshape(4,shape_mem[1]*shape_mem[2])) #equ15 A.T * k0
+            #grid_plane_moved = np.matmul( grid_plane.reshape(4,shape_mem[1]*shape_mem[2]).T, aff.T).T # r0.T * A.T
+            grid_out[:, :, :, nnp] = grid_plane_moved.reshape(shape_mem)
+
+        #tricky to insverse a given transpose
+        dim_order_back = np.array([np.argwhere(dim_order==k)[0][0] for k in range(4)])
+        grid_out = grid_out.transpose(dim_order_back) #go back to original order
+
+        #! multiply the diagnal matrix of 1/voxel_size to get the correct scaling of the grid_out
+        diagnal_matrix = np.diag([self.dx, self.dy, self.dz, 1])
+        grid_out = (grid_out.reshape(4, -1).T @ diagnal_matrix).T.reshape(4, *image_shape)
+        # also need to multiply 2 pi
+        grid_out *= 2 * np.pi
+        
+        return grid_out
+
